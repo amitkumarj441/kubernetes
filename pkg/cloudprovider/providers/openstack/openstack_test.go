@@ -30,6 +30,7 @@ import (
 	"github.com/gophercloud/gophercloud/openstack/compute/v2/servers"
 	"k8s.io/api/core/v1"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -45,14 +46,14 @@ const (
 	// waiting for specified volume status. Starting with 1
 	// seconds, multiplying by 1.2 with each step and taking 13 steps at maximum
 	// it will time out after 32s, which roughly corresponds to 30s
-	volumeStatusInitDealy = 1 * time.Second
+	volumeStatusInitDelay = 1 * time.Second
 	volumeStatusFactor    = 1.2
 	volumeStatusSteps     = 13
 )
 
 func WaitForVolumeStatus(t *testing.T, os *OpenStack, volumeName string, status string) {
 	backoff := wait.Backoff{
-		Duration: volumeStatusInitDealy,
+		Duration: volumeStatusInitDelay,
 		Factor:   volumeStatusFactor,
 		Steps:    volumeStatusSteps,
 	}
@@ -89,10 +90,17 @@ func TestReadConfig(t *testing.T) {
 		t.Errorf("Should fail when no config is provided: %s", err)
 	}
 
+	os.Setenv("OS_PASSWORD", "mypass")
+	defer os.Unsetenv("OS_PASSWORD")
+
+	os.Setenv("OS_TENANT_NAME", "admin")
+	defer os.Unsetenv("OS_TENANT_NAME")
+
 	cfg, err := readConfig(strings.NewReader(`
  [Global]
  auth-url = http://auth.url
- username = user
+ user-id = user
+ tenant-name = demo
  [LoadBalancer]
  create-monitor = yes
  monitor-delay = 1m
@@ -110,6 +118,19 @@ func TestReadConfig(t *testing.T) {
 	}
 	if cfg.Global.AuthUrl != "http://auth.url" {
 		t.Errorf("incorrect authurl: %s", cfg.Global.AuthUrl)
+	}
+
+	if cfg.Global.UserId != "user" {
+		t.Errorf("incorrect userid: %s", cfg.Global.UserId)
+	}
+
+	if cfg.Global.Password != "mypass" {
+		t.Errorf("incorrect password: %s", cfg.Global.Password)
+	}
+
+	// config file wins over environment variable
+	if cfg.Global.TenantName != "demo" {
+		t.Errorf("incorrect tenant name: %s", cfg.Global.TenantName)
 	}
 
 	if !cfg.LoadBalancer.CreateMonitor {
@@ -376,56 +397,6 @@ func TestNodeAddresses(t *testing.T) {
 	}
 }
 
-// This allows acceptance testing against an existing OpenStack
-// install, using the standard OS_* OpenStack client environment
-// variables.
-// FIXME: it would be better to hermetically test against canned JSON
-// requests/responses.
-func configFromEnv() (cfg Config, ok bool) {
-	cfg.Global.AuthUrl = os.Getenv("OS_AUTH_URL")
-
-	cfg.Global.TenantId = os.Getenv("OS_TENANT_ID")
-	// Rax/nova _insists_ that we don't specify both tenant ID and name
-	if cfg.Global.TenantId == "" {
-		cfg.Global.TenantName = os.Getenv("OS_TENANT_NAME")
-	}
-
-	cfg.Global.Username = os.Getenv("OS_USERNAME")
-	cfg.Global.Password = os.Getenv("OS_PASSWORD")
-	cfg.Global.Region = os.Getenv("OS_REGION_NAME")
-
-	cfg.Global.TenantName = os.Getenv("OS_TENANT_NAME")
-	if cfg.Global.TenantName == "" {
-		cfg.Global.TenantName = os.Getenv("OS_PROJECT_NAME")
-	}
-
-	cfg.Global.TenantId = os.Getenv("OS_TENANT_ID")
-	if cfg.Global.TenantId == "" {
-		cfg.Global.TenantId = os.Getenv("OS_PROJECT_ID")
-	}
-
-	cfg.Global.DomainId = os.Getenv("OS_DOMAIN_ID")
-	if cfg.Global.DomainId == "" {
-		cfg.Global.DomainId = os.Getenv("OS_USER_DOMAIN_ID")
-	}
-
-	cfg.Global.DomainName = os.Getenv("OS_DOMAIN_NAME")
-	if cfg.Global.DomainName == "" {
-		cfg.Global.DomainName = os.Getenv("OS_USER_DOMAIN_NAME")
-	}
-
-	ok = (cfg.Global.AuthUrl != "" &&
-		cfg.Global.Username != "" &&
-		cfg.Global.Password != "" &&
-		(cfg.Global.TenantId != "" || cfg.Global.TenantName != "" ||
-			cfg.Global.DomainId != "" || cfg.Global.DomainName != ""))
-
-	cfg.Metadata.SearchOrder = fmt.Sprintf("%s,%s", configDriveID, metadataID)
-	cfg.BlockStorage.BSVersion = "auto"
-
-	return
-}
-
 func TestNewOpenStack(t *testing.T) {
 	cfg, ok := configFromEnv()
 	if !ok {
@@ -551,6 +522,18 @@ func TestVolumes(t *testing.T) {
 		WaitForVolumeStatus(t, os, vol, volumeAvailableStatus)
 	}
 
+	expectedVolSize := resource.MustParse("2Gi")
+	newVolSize, err := os.ExpandVolume(vol, resource.MustParse("1Gi"), expectedVolSize)
+	if err != nil {
+		t.Fatalf("Cannot expand a Cinder volume: %v", err)
+	}
+	if newVolSize != expectedVolSize {
+		t.Logf("Expected: %v but got: %v ", expectedVolSize, newVolSize)
+	}
+	t.Logf("Volume expanded to (%v) \n", newVolSize)
+
+	WaitForVolumeStatus(t, os, vol, volumeAvailableStatus)
+
 	err = os.DeleteVolume(vol)
 	if err != nil {
 		t.Fatalf("Cannot delete Cinder volume %s: %v", vol, err)
@@ -600,5 +583,39 @@ func TestInstanceIDFromProviderID(t *testing.T) {
 		if instanceID != test.instanceID {
 			t.Errorf("%s yielded %s. expected %s", test.providerID, instanceID, test.instanceID)
 		}
+	}
+}
+
+func TestToAuth3Options(t *testing.T) {
+	cfg := Config{}
+	cfg.Global.Username = "user"
+	cfg.Global.Password = "pass"
+	cfg.Global.DomainId = "2a73b8f597c04551a0fdc8e95544be8a"
+	cfg.Global.DomainName = "local"
+	cfg.Global.AuthUrl = "http://auth.url"
+	cfg.Global.UserId = "user"
+
+	ao := cfg.toAuth3Options()
+
+	if !ao.AllowReauth {
+		t.Errorf("Will need to be able to reauthenticate")
+	}
+	if ao.Username != cfg.Global.Username {
+		t.Errorf("Username %s != %s", ao.Username, cfg.Global.Username)
+	}
+	if ao.Password != cfg.Global.Password {
+		t.Errorf("Password %s != %s", ao.Password, cfg.Global.Password)
+	}
+	if ao.DomainID != cfg.Global.DomainId {
+		t.Errorf("DomainID %s != %s", ao.DomainID, cfg.Global.DomainId)
+	}
+	if ao.IdentityEndpoint != cfg.Global.AuthUrl {
+		t.Errorf("IdentityEndpoint %s != %s", ao.IdentityEndpoint, cfg.Global.AuthUrl)
+	}
+	if ao.UserID != cfg.Global.UserId {
+		t.Errorf("UserID %s != %s", ao.UserID, cfg.Global.UserId)
+	}
+	if ao.DomainName != cfg.Global.DomainName {
+		t.Errorf("DomainName %s != %s", ao.DomainName, cfg.Global.DomainName)
 	}
 }

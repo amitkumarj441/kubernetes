@@ -56,15 +56,14 @@ func Funcs(codecs runtimeserializer.CodecFactory) []interface{} {
 			obj.FileCheckFrequency = metav1.Duration{Duration: 20 * time.Second}
 			obj.HealthzBindAddress = "127.0.0.1"
 			obj.HealthzPort = 10248
-			obj.HostNetworkSources = []string{kubetypes.AllSource}
-			obj.HostPIDSources = []string{kubetypes.AllSource}
-			obj.HostIPCSources = []string{kubetypes.AllSource}
 			obj.HTTPCheckFrequency = metav1.Duration{Duration: 20 * time.Second}
 			obj.ImageMinimumGCAge = metav1.Duration{Duration: 2 * time.Minute}
 			obj.ImageGCHighThresholdPercent = 85
 			obj.ImageGCLowThresholdPercent = 80
 			obj.MaxOpenFiles = 1000000
 			obj.MaxPods = 110
+			temp := int64(-1)
+			obj.PodPidsLimit = &temp
 			obj.NodeStatusUpdateFrequency = metav1.Duration{Duration: 10 * time.Second}
 			obj.CPUManagerPolicy = "none"
 			obj.CPUManagerReconcilePeriod = obj.NodeStatusUpdateFrequency

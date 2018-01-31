@@ -30,12 +30,6 @@ import (
 const (
 	DefaultRootDir = "/var/lib/kubelet"
 
-	// DEPRECATED: auto detecting cloud providers goes against the initiative
-	// for out-of-tree cloud providers as we'll now depend on cAdvisor integrations
-	// with cloud providers instead of in the core repo.
-	// More details here: https://github.com/kubernetes/kubernetes/issues/50986
-	AutoDetectCloudProvider = "auto-detect"
-
 	DefaultIPTablesMasqueradeBit = 14
 	DefaultIPTablesDropBit       = 15
 )
@@ -114,15 +108,6 @@ func SetDefaults_KubeletConfiguration(obj *KubeletConfiguration) {
 	if obj.HealthzPort == nil {
 		obj.HealthzPort = utilpointer.Int32Ptr(10248)
 	}
-	if obj.HostNetworkSources == nil {
-		obj.HostNetworkSources = []string{kubetypes.AllSource}
-	}
-	if obj.HostPIDSources == nil {
-		obj.HostPIDSources = []string{kubetypes.AllSource}
-	}
-	if obj.HostIPCSources == nil {
-		obj.HostIPCSources = []string{kubetypes.AllSource}
-	}
 	if obj.HTTPCheckFrequency == zeroDuration {
 		obj.HTTPCheckFrequency = metav1.Duration{Duration: 20 * time.Second}
 	}
@@ -143,6 +128,10 @@ func SetDefaults_KubeletConfiguration(obj *KubeletConfiguration) {
 	}
 	if obj.MaxPods == 0 {
 		obj.MaxPods = 110
+	}
+	if obj.PodPidsLimit == nil {
+		temp := int64(-1)
+		obj.PodPidsLimit = &temp
 	}
 	if obj.NodeStatusUpdateFrequency == zeroDuration {
 		obj.NodeStatusUpdateFrequency = metav1.Duration{Duration: 10 * time.Second}
@@ -216,6 +205,9 @@ func SetDefaults_KubeletConfiguration(obj *KubeletConfiguration) {
 	if obj.IPTablesDropBit == nil {
 		temp := int32(DefaultIPTablesDropBit)
 		obj.IPTablesDropBit = &temp
+	}
+	if obj.FailSwapOn == nil {
+		obj.FailSwapOn = utilpointer.BoolPtr(true)
 	}
 	if obj.CgroupsPerQOS == nil {
 		temp := true

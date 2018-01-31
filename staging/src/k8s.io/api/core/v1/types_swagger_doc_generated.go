@@ -121,6 +121,7 @@ var map_CSIPersistentVolumeSource = map[string]string{
 	"driver":       "Driver is the name of the driver to use for this volume. Required.",
 	"volumeHandle": "VolumeHandle is the unique volume name returned by the CSI volume plugin’s CreateVolume to refer to the volume on all subsequent calls. Required.",
 	"readOnly":     "Optional: The value to pass to ControllerPublishVolumeRequest. Defaults to false (read/write).",
+	"fsType":       "Filesystem type to mount. Must be a filesystem type supported by the host operating system. Ex. \"ext4\", \"xfs\", \"ntfs\". Implicitly inferred to be \"ext4\" if unspecified.",
 }
 
 func (CSIPersistentVolumeSource) SwaggerDoc() map[string]string {
@@ -218,9 +219,10 @@ func (ComponentStatusList) SwaggerDoc() map[string]string {
 }
 
 var map_ConfigMap = map[string]string{
-	"":         "ConfigMap holds configuration data for pods to consume.",
-	"metadata": "Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#metadata",
-	"data":     "Data contains the configuration data. Each key must consist of alphanumeric characters, '-', '_' or '.'.",
+	"":           "ConfigMap holds configuration data for pods to consume.",
+	"metadata":   "Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#metadata",
+	"data":       "Data contains the configuration data. Each key must consist of alphanumeric characters, '-', '_' or '.'. Values with non-UTF-8 byte sequences must use the BinaryData field. The keys stored in Data must not overlap with the keys in the BinaryData field, this is enforced during validation process.",
+	"binaryData": "BinaryData contains the binary data. Each key must consist of alphanumeric characters, '-', '_' or '.'. BinaryData can contain byte sequences that are not in the UTF-8 range. The keys stored in BinaryData must not overlap with the ones in the Data field, this is enforced during validation process. Using this field will require 1.10+ apiserver and kubelet.",
 }
 
 func (ConfigMap) SwaggerDoc() map[string]string {
@@ -616,8 +618,21 @@ func (FCVolumeSource) SwaggerDoc() map[string]string {
 	return map_FCVolumeSource
 }
 
+var map_FlexPersistentVolumeSource = map[string]string{
+	"":          "FlexPersistentVolumeSource represents a generic persistent volume resource that is provisioned/attached using an exec based plugin.",
+	"driver":    "Driver is the name of the driver to use for this volume.",
+	"fsType":    "Filesystem type to mount. Must be a filesystem type supported by the host operating system. Ex. \"ext4\", \"xfs\", \"ntfs\". The default filesystem depends on FlexVolume script.",
+	"secretRef": "Optional: SecretRef is reference to the secret object containing sensitive information to pass to the plugin scripts. This may be empty if no secret object is specified. If the secret object contains more than one secret, all secrets are passed to the plugin scripts.",
+	"readOnly":  "Optional: Defaults to false (read/write). ReadOnly here will force the ReadOnly setting in VolumeMounts.",
+	"options":   "Optional: Extra command options if any.",
+}
+
+func (FlexPersistentVolumeSource) SwaggerDoc() map[string]string {
+	return map_FlexPersistentVolumeSource
+}
+
 var map_FlexVolumeSource = map[string]string{
-	"":          "FlexVolume represents a generic volume resource that is provisioned/attached using an exec based plugin. This is an alpha feature and may change in future.",
+	"":          "FlexVolume represents a generic volume resource that is provisioned/attached using an exec based plugin.",
 	"driver":    "Driver is the name of the driver to use for this volume.",
 	"fsType":    "Filesystem type to mount. Must be a filesystem type supported by the host operating system. Ex. \"ext4\", \"xfs\", \"ntfs\". The default filesystem depends on FlexVolume script.",
 	"secretRef": "Optional: SecretRef is reference to the secret object containing sensitive information to pass to the plugin scripts. This may be empty if no secret object is specified. If the secret object contains more than one secret, all secrets are passed to the plugin scripts.",
@@ -1251,7 +1266,7 @@ var map_PersistentVolumeSource = map[string]string{
 	"cephfs":               "CephFS represents a Ceph FS mount on the host that shares a pod's lifetime",
 	"fc":                   "FC represents a Fibre Channel resource that is attached to a kubelet's host machine and then exposed to the pod.",
 	"flocker":              "Flocker represents a Flocker volume attached to a kubelet's host machine and exposed to the pod for its usage. This depends on the Flocker control service being running",
-	"flexVolume":           "FlexVolume represents a generic volume resource that is provisioned/attached using an exec based plugin. This is an alpha feature and may change in future.",
+	"flexVolume":           "FlexVolume represents a generic volume resource that is provisioned/attached using an exec based plugin.",
 	"azureFile":            "AzureFile represents an Azure File Service mount on the host and bind mount to the pod.",
 	"vsphereVolume":        "VsphereVolume represents a vSphere volume attached and mounted on kubelets host machine",
 	"quobyte":              "Quobyte represents a Quobyte mount on the host that shares a pod's lifetime",
@@ -1518,7 +1533,7 @@ var map_PodStatus = map[string]string{
 	"startTime":             "RFC 3339 date and time at which the object was acknowledged by the Kubelet. This is before the Kubelet pulled the container image(s) for the pod.",
 	"initContainerStatuses": "The list has one entry per init container in the manifest. The most recent successful init container will have ready = true, the most recently started container will have startTime set. More info: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#pod-and-container-status",
 	"containerStatuses":     "The list has one entry per container in the manifest. Each entry is currently the output of `docker inspect`. More info: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#pod-and-container-status",
-	"qosClass":              "The Quality of Service (QOS) classification assigned to the pod based on resource requirements See PodQOSClass type for available QOS classes More info: https://github.com/kubernetes/kubernetes/blob/master/docs/design/resource-qos.md",
+	"qosClass":              "The Quality of Service (QOS) classification assigned to the pod based on resource requirements See PodQOSClass type for available QOS classes More info: https://git.k8s.io/community/contributors/design-proposals/node/resource-qos.md",
 }
 
 func (PodStatus) SwaggerDoc() map[string]string {
@@ -2184,7 +2199,7 @@ var map_VolumeSource = map[string]string{
 	"glusterfs":             "Glusterfs represents a Glusterfs mount on the host that shares a pod's lifetime. More info: https://releases.k8s.io/HEAD/examples/volumes/glusterfs/README.md",
 	"persistentVolumeClaim": "PersistentVolumeClaimVolumeSource represents a reference to a PersistentVolumeClaim in the same namespace. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#persistentvolumeclaims",
 	"rbd":                  "RBD represents a Rados Block Device mount on the host that shares a pod's lifetime. More info: https://releases.k8s.io/HEAD/examples/volumes/rbd/README.md",
-	"flexVolume":           "FlexVolume represents a generic volume resource that is provisioned/attached using an exec based plugin. This is an alpha feature and may change in future.",
+	"flexVolume":           "FlexVolume represents a generic volume resource that is provisioned/attached using an exec based plugin.",
 	"cinder":               "Cinder represents a cinder volume attached and mounted on kubelets host machine More info: https://releases.k8s.io/HEAD/examples/mysql-cinder-pd/README.md",
 	"cephfs":               "CephFS represents a Ceph FS mount on the host that shares a pod's lifetime",
 	"flocker":              "Flocker represents a Flocker volume attached to a kubelet's host machine. This depends on the Flocker control service being running",

@@ -84,7 +84,8 @@ var (
 func NewCmdApplySetLastApplied(f cmdutil.Factory, out, err io.Writer) *cobra.Command {
 	options := &SetLastAppliedOptions{Out: out, ErrOut: err}
 	cmd := &cobra.Command{
-		Use:     "set-last-applied -f FILENAME",
+		Use: "set-last-applied -f FILENAME",
+		DisableFlagsInUseLine: true,
 		Short:   i18n.T("Set the last-applied-configuration annotation on a live object to match the contents of a file."),
 		Long:    applySetLastAppliedLong,
 		Example: applySetLastAppliedExample,
@@ -106,7 +107,7 @@ func NewCmdApplySetLastApplied(f cmdutil.Factory, out, err io.Writer) *cobra.Com
 }
 
 func (o *SetLastAppliedOptions) Complete(f cmdutil.Factory, cmd *cobra.Command) error {
-	o.DryRun = cmdutil.GetFlagBool(cmd, "dry-run")
+	o.DryRun = cmdutil.GetDryRunFlag(cmd)
 	o.Output = cmdutil.GetFlagString(cmd, "output")
 	o.ShortOutput = o.Output == "name"
 	o.Codec = f.JSONEncoder()

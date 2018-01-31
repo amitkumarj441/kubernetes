@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -44,6 +45,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	apiservoptions "k8s.io/kubernetes/cmd/kube-apiserver/app/options"
 	cmoptions "k8s.io/kubernetes/cmd/kube-controller-manager/app/options"
+	schedulerapp "k8s.io/kubernetes/cmd/kube-scheduler/app"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/pkg/apis/core/validation"
@@ -52,7 +54,6 @@ import (
 	"k8s.io/kubernetes/pkg/util/initsystem"
 	versionutil "k8s.io/kubernetes/pkg/util/version"
 	kubeadmversion "k8s.io/kubernetes/pkg/version"
-	schedulerapp "k8s.io/kubernetes/plugin/cmd/kube-scheduler/app"
 	"k8s.io/kubernetes/test/e2e_node/system"
 	utilsexec "k8s.io/utils/exec"
 )
@@ -79,7 +80,7 @@ func (e *Error) Error() string {
 }
 
 // Checker validates the state of the system to ensure kubeadm will be
-// successful as often as possilble.
+// successful as often as possible.
 type Checker interface {
 	Check() (warnings, errors []error)
 	Name() string
@@ -347,6 +348,7 @@ type InPathCheck struct {
 	mandatory  bool
 	exec       utilsexec.Interface
 	label      string
+	suggestion string
 }
 
 // Name returns label for individual InPathCheck. If not known, will return based on path.
@@ -358,7 +360,7 @@ func (ipc InPathCheck) Name() string {
 }
 
 // Check validates if the given executable is present in the path.
-func (ipc InPathCheck) Check() (warnings, errors []error) {
+func (ipc InPathCheck) Check() (warnings, errs []error) {
 	_, err := ipc.exec.LookPath(ipc.executable)
 	if err != nil {
 		if ipc.mandatory {
@@ -366,7 +368,11 @@ func (ipc InPathCheck) Check() (warnings, errors []error) {
 			return nil, []error{fmt.Errorf("%s not found in system path", ipc.executable)}
 		}
 		// Return as a warning:
-		return []error{fmt.Errorf("%s not found in system path", ipc.executable)}, nil
+		warningMessage := fmt.Sprintf("%s not found in system path", ipc.executable)
+		if ipc.suggestion != "" {
+			warningMessage += fmt.Sprintf("\nSuggestion: %s", ipc.suggestion)
+		}
+		return []error{errors.New(warningMessage)}, nil
 	}
 	return nil, nil
 }
@@ -422,7 +428,7 @@ func (hst HTTPProxyCheck) Check() (warnings, errors []error) {
 		return nil, []error{err}
 	}
 
-	proxy, err := http.DefaultTransport.(*http.Transport).Proxy(req)
+	proxy, err := netutil.SetOldTransportDefaults(&http.Transport{}).Proxy(req)
 	if err != nil {
 		return nil, []error{err}
 	}
@@ -525,9 +531,12 @@ func (eac ExtraArgsCheck) Check() (warnings, errors []error) {
 		warnings = append(warnings, argsCheck("kube-controller-manager", eac.ControllerManagerExtraArgs, flags)...)
 	}
 	if len(eac.SchedulerExtraArgs) > 0 {
-		command := schedulerapp.NewSchedulerCommand()
+		opts, err := schedulerapp.NewOptions()
+		if err != nil {
+			warnings = append(warnings, err)
+		}
 		flags := pflag.NewFlagSet("", pflag.ContinueOnError)
-		flags.AddFlagSet(command.Flags())
+		opts.AddFlags(flags)
 		warnings = append(warnings, argsCheck("kube-scheduler", eac.SchedulerExtraArgs, flags)...)
 	}
 	return warnings, nil
@@ -795,15 +804,15 @@ func (evc ExternalEtcdVersionCheck) configCertAndKey(config *tls.Config) (*tls.C
 
 func (evc ExternalEtcdVersionCheck) getHTTPClient(config *tls.Config) *http.Client {
 	if config != nil {
-		transport := &http.Transport{
+		transport := netutil.SetOldTransportDefaults(&http.Transport{
 			TLSClientConfig: config,
-		}
+		})
 		return &http.Client{
 			Transport: transport,
 			Timeout:   externalEtcdRequestTimeout,
 		}
 	}
-	return &http.Client{Timeout: externalEtcdRequestTimeout}
+	return &http.Client{Timeout: externalEtcdRequestTimeout, Transport: netutil.SetOldTransportDefaults(&http.Transport{})}
 }
 
 func getEtcdVersionResponse(client *http.Client, url string, target interface{}) error {
@@ -844,9 +853,16 @@ func RunInitMasterChecks(execer utilsexec.Interface, cfg *kubeadmapi.MasterConfi
 	}
 
 	// check if we can use crictl to perform checks via the CRI
-	criCtlChecker := InPathCheck{executable: "crictl", mandatory: false, exec: execer}
+	criCtlChecker := InPathCheck{
+		executable: "crictl",
+		mandatory:  false,
+		exec:       execer,
+		suggestion: fmt.Sprintf("go get %v", kubeadmconstants.CRICtlPackage),
+	}
 	warns, _ := criCtlChecker.Check()
 	useCRI := len(warns) == 0
+
+	manifestsDir := filepath.Join(kubeadmconstants.KubernetesDir, kubeadmconstants.ManifestsSubDirName)
 
 	checks := []Checker{
 		KubernetesVersionCheck{KubernetesVersion: cfg.KubernetesVersion, KubeadmVersion: kubeadmversion.Get().GitVersion},
@@ -860,7 +876,10 @@ func RunInitMasterChecks(execer utilsexec.Interface, cfg *kubeadmapi.MasterConfi
 		PortOpenCheck{port: 10250},
 		PortOpenCheck{port: 10251},
 		PortOpenCheck{port: 10252},
-		DirAvailableCheck{Path: filepath.Join(kubeadmconstants.KubernetesDir, kubeadmconstants.ManifestsSubDirName)},
+		FileAvailableCheck{Path: kubeadmconstants.GetStaticPodFilepath(kubeadmconstants.KubeAPIServer, manifestsDir)},
+		FileAvailableCheck{Path: kubeadmconstants.GetStaticPodFilepath(kubeadmconstants.KubeControllerManager, manifestsDir)},
+		FileAvailableCheck{Path: kubeadmconstants.GetStaticPodFilepath(kubeadmconstants.KubeScheduler, manifestsDir)},
+		FileAvailableCheck{Path: kubeadmconstants.GetStaticPodFilepath(kubeadmconstants.Etcd, manifestsDir)},
 		FileContentCheck{Path: bridgenf, Content: []byte{'1'}},
 		SwapCheck{},
 		InPathCheck{executable: "ip", mandatory: true, exec: execer},
@@ -940,7 +959,12 @@ func RunJoinNodeChecks(execer utilsexec.Interface, cfg *kubeadmapi.NodeConfigura
 	}
 
 	// check if we can use crictl to perform checks via the CRI
-	criCtlChecker := InPathCheck{executable: "crictl", mandatory: false, exec: execer}
+	criCtlChecker := InPathCheck{
+		executable: "crictl",
+		mandatory:  false,
+		exec:       execer,
+		suggestion: fmt.Sprintf("go get %v", kubeadmconstants.CRICtlPackage),
+	}
 	warns, _ := criCtlChecker.Check()
 	useCRI := len(warns) == 0
 
@@ -978,12 +1002,16 @@ func RunJoinNodeChecks(execer utilsexec.Interface, cfg *kubeadmapi.NodeConfigura
 			criCtlChecker)
 	}
 
-	if len(cfg.DiscoveryTokenAPIServers) > 0 {
-		if ip := net.ParseIP(cfg.DiscoveryTokenAPIServers[0]); ip != nil {
-			if ip.To4() == nil && ip.To16() != nil {
-				checks = append(checks,
-					FileContentCheck{Path: bridgenf6, Content: []byte{'1'}},
-				)
+	for _, server := range cfg.DiscoveryTokenAPIServers {
+		ipstr, _, err := net.SplitHostPort(server)
+		if err == nil {
+			if ip := net.ParseIP(ipstr); ip != nil {
+				if ip.To4() == nil && ip.To16() != nil {
+					checks = append(checks,
+						FileContentCheck{Path: bridgenf6, Content: []byte{'1'}},
+					)
+					break // Ensure that check is added only once
+				}
 			}
 		}
 	}

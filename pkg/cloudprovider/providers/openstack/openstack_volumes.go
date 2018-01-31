@@ -17,6 +17,7 @@ limitations under the License.
 package openstack
 
 import (
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"path"
@@ -24,8 +25,13 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/kubernetes/pkg/cloudprovider"
+	kubeletapis "k8s.io/kubernetes/pkg/kubelet/apis"
 	k8s_volume "k8s.io/kubernetes/pkg/volume"
+	volumeutil "k8s.io/kubernetes/pkg/volume/util"
 
 	"github.com/gophercloud/gophercloud"
 	volumeexpand "github.com/gophercloud/gophercloud/openstack/blockstorage/extensions/volumeactions"
@@ -68,6 +74,8 @@ type Volume struct {
 	AttachedServerId string
 	// Device file path
 	AttachedDevice string
+	// AvailabilityZone is which availability zone the volume is in
+	AvailabilityZone string
 	// Unique identifier for the volume.
 	ID string
 	// Human-readable display name for the volume.
@@ -85,6 +93,9 @@ type VolumeCreateOpts struct {
 	VolumeType   string
 	Metadata     map[string]string
 }
+
+// implements PVLabeler.
+var _ cloudprovider.PVLabeler = (*OpenStack)(nil)
 
 const (
 	VolumeAvailableStatus = "available"
@@ -168,10 +179,11 @@ func (volumes *VolumesV1) getVolume(volumeID string) (Volume, error) {
 	}
 
 	volume := Volume{
-		ID:     volumeV1.ID,
-		Name:   volumeV1.Name,
-		Status: volumeV1.Status,
-		Size:   volumeV1.Size,
+		AvailabilityZone: volumeV1.AvailabilityZone,
+		ID:               volumeV1.ID,
+		Name:             volumeV1.Name,
+		Status:           volumeV1.Status,
+		Size:             volumeV1.Size,
 	}
 
 	if len(volumeV1.Attachments) > 0 && volumeV1.Attachments[0]["server_id"] != nil {
@@ -192,10 +204,11 @@ func (volumes *VolumesV2) getVolume(volumeID string) (Volume, error) {
 	}
 
 	volume := Volume{
-		ID:     volumeV2.ID,
-		Name:   volumeV2.Name,
-		Status: volumeV2.Status,
-		Size:   volumeV2.Size,
+		AvailabilityZone: volumeV2.AvailabilityZone,
+		ID:               volumeV2.ID,
+		Name:             volumeV2.Name,
+		Status:           volumeV2.Status,
+		Size:             volumeV2.Size,
 	}
 
 	if len(volumeV2.Attachments) > 0 {
@@ -216,9 +229,10 @@ func (volumes *VolumesV3) getVolume(volumeID string) (Volume, error) {
 	}
 
 	volume := Volume{
-		ID:     volumeV3.ID,
-		Name:   volumeV3.Name,
-		Status: volumeV3.Status,
+		AvailabilityZone: volumeV3.AvailabilityZone,
+		ID:               volumeV3.ID,
+		Name:             volumeV3.Name,
+		Status:           volumeV3.Status,
 	}
 
 	if len(volumeV3.Attachments) > 0 {
@@ -318,7 +332,17 @@ func (os *OpenStack) AttachDisk(instanceID, volumeID string) (string, error) {
 			glog.V(4).Infof("Disk %s is already attached to instance %s", volumeID, instanceID)
 			return volume.ID, nil
 		}
-		return "", fmt.Errorf("disk %s is attached to a different instance (%s)", volumeID, volume.AttachedServerId)
+		nodeName, err := os.GetNodeNameByID(volume.AttachedServerId)
+		attachErr := fmt.Sprintf("disk %s path %s is attached to a different instance (%s)", volumeID, volume.AttachedDevice, volume.AttachedServerId)
+		if err != nil {
+			glog.Error(attachErr)
+			return "", errors.New(attachErr)
+		}
+		// using volume.AttachedDevice may cause problems because cinder does not report device path correctly see issue #33128
+		devicePath := volume.AttachedDevice
+		danglingErr := volumeutil.NewDanglingError(attachErr, nodeName, devicePath)
+		glog.V(2).Infof("Found dangling volume %s attached to node %s", volumeID, nodeName)
+		return "", danglingErr
 	}
 
 	startTime := time.Now()
@@ -578,6 +602,9 @@ func (os *OpenStack) GetAttachmentDiskPath(instanceID, volumeID string) (string,
 
 // DiskIsAttached queries if a volume is attached to a compute instance
 func (os *OpenStack) DiskIsAttached(instanceID, volumeID string) (bool, error) {
+	if instanceID == "" {
+		glog.Warningf("calling DiskIsAttached with empty instanceid: %s %s", instanceID, volumeID)
+	}
 	volume, err := os.getVolume(volumeID)
 	if err != nil {
 		return false, err
@@ -586,14 +613,67 @@ func (os *OpenStack) DiskIsAttached(instanceID, volumeID string) (bool, error) {
 	return instanceID == volume.AttachedServerId, nil
 }
 
+// DiskIsAttachedByName queries if a volume is attached to a compute instance by name
+func (os *OpenStack) DiskIsAttachedByName(nodeName types.NodeName, volumeID string) (bool, string, error) {
+	cClient, err := os.NewComputeV2()
+	if err != nil {
+		return false, "", err
+	}
+	srv, err := getServerByName(cClient, nodeName, false)
+	if err != nil {
+		if err == ErrNotFound {
+			// instance not found anymore in cloudprovider, assume that cinder is detached
+			return false, "", nil
+		} else {
+			return false, "", err
+		}
+	}
+	instanceID := "/" + srv.ID
+	if ind := strings.LastIndex(instanceID, "/"); ind >= 0 {
+		instanceID = instanceID[(ind + 1):]
+	}
+	attached, err := os.DiskIsAttached(instanceID, volumeID)
+	return attached, instanceID, err
+}
+
 // DisksAreAttached queries if a list of volumes are attached to a compute instance
 func (os *OpenStack) DisksAreAttached(instanceID string, volumeIDs []string) (map[string]bool, error) {
 	attached := make(map[string]bool)
 	for _, volumeID := range volumeIDs {
-		isAttached, _ := os.DiskIsAttached(instanceID, volumeID)
+		isAttached, err := os.DiskIsAttached(instanceID, volumeID)
+		if err != nil && err != ErrNotFound {
+			attached[volumeID] = true
+			continue
+		}
 		attached[volumeID] = isAttached
 	}
 	return attached, nil
+}
+
+// DisksAreAttachedByName queries if a list of volumes are attached to a compute instance by name
+func (os *OpenStack) DisksAreAttachedByName(nodeName types.NodeName, volumeIDs []string) (map[string]bool, error) {
+	attached := make(map[string]bool)
+	cClient, err := os.NewComputeV2()
+	if err != nil {
+		return attached, err
+	}
+	srv, err := getServerByName(cClient, nodeName, false)
+	if err != nil {
+		if err == ErrNotFound {
+			// instance not found anymore, mark all volumes as detached
+			for _, volumeID := range volumeIDs {
+				attached[volumeID] = false
+			}
+			return attached, nil
+		} else {
+			return attached, err
+		}
+	}
+	instanceID := "/" + srv.ID
+	if ind := strings.LastIndex(instanceID, "/"); ind >= 0 {
+		instanceID = instanceID[(ind + 1):]
+	}
+	return os.DisksAreAttached(instanceID, volumeIDs)
 }
 
 // diskIsUsed returns true a disk is attached to any node.
@@ -608,6 +688,28 @@ func (os *OpenStack) diskIsUsed(volumeID string) (bool, error) {
 // ShouldTrustDevicePath queries if we should trust the cinder provide deviceName, See issue #33128
 func (os *OpenStack) ShouldTrustDevicePath() bool {
 	return os.bsOpts.TrustDevicePath
+}
+
+// GetLabelsForVolume implements PVLabeler.GetLabelsForVolume
+func (os *OpenStack) GetLabelsForVolume(pv *v1.PersistentVolume) (map[string]string, error) {
+	// Ignore any volumes that are being provisioned
+	if pv.Spec.Cinder.VolumeID == k8s_volume.ProvisionedVolumeName {
+		return nil, nil
+	}
+
+	// Get Volume
+	volume, err := os.getVolume(pv.Spec.Cinder.VolumeID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Contruct Volume Labels
+	labels := make(map[string]string)
+	labels[kubeletapis.LabelZoneFailureDomain] = volume.AvailabilityZone
+	labels[kubeletapis.LabelZoneRegion] = os.region
+	glog.V(4).Infof("The Volume %s has labels %v", pv.Spec.Cinder.VolumeID, labels)
+
+	return labels, nil
 }
 
 // recordOpenstackOperationMetric records openstack operation metrics

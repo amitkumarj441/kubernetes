@@ -29,10 +29,10 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/kubernetes/pkg/features"
 	statsapi "k8s.io/kubernetes/pkg/kubelet/apis/stats/v1alpha1"
-	"k8s.io/kubernetes/pkg/kubelet/cm"
 	evictionapi "k8s.io/kubernetes/pkg/kubelet/eviction/api"
 	"k8s.io/kubernetes/pkg/kubelet/server/stats"
-	schedulerutils "k8s.io/kubernetes/plugin/pkg/scheduler/util"
+	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
+	schedulerutils "k8s.io/kubernetes/pkg/scheduler/util"
 )
 
 const (
@@ -198,7 +198,7 @@ func parseThresholdStatement(signal evictionapi.Signal, val string) (evictionapi
 // getAllocatableThreshold returns the thresholds applicable for the allocatable configuration
 func getAllocatableThreshold(allocatableConfig []string) []evictionapi.Threshold {
 	for _, key := range allocatableConfig {
-		if key == cm.NodeAllocatableEnforcementKey {
+		if key == kubetypes.NodeAllocatableEnforcementKey {
 			return []evictionapi.Threshold{
 				{
 					Signal:   evictionapi.SignalAllocatableMemoryAvailable,
@@ -590,7 +590,7 @@ func memory(stats statsFunc) cmpFunc {
 }
 
 // podRequest returns the total resource request of a pod which is the
-// max(sum of init container requests, sum of container requests)
+// max(max of init container requests, sum of container requests)
 func podRequest(pod *v1.Pod, resourceName v1.ResourceName) resource.Quantity {
 	containerValue := resource.Quantity{Format: resource.BinarySI}
 	if resourceName == resourceDisk && !utilfeature.DefaultFeatureGate.Enabled(features.LocalStorageCapacityIsolation) {
@@ -609,9 +609,13 @@ func podRequest(pod *v1.Pod, resourceName v1.ResourceName) resource.Quantity {
 	for i := range pod.Spec.InitContainers {
 		switch resourceName {
 		case v1.ResourceMemory:
-			containerValue.Add(*pod.Spec.Containers[i].Resources.Requests.Memory())
+			if initValue.Cmp(*pod.Spec.InitContainers[i].Resources.Requests.Memory()) < 0 {
+				initValue = *pod.Spec.InitContainers[i].Resources.Requests.Memory()
+			}
 		case resourceDisk:
-			containerValue.Add(*pod.Spec.Containers[i].Resources.Requests.StorageEphemeral())
+			if initValue.Cmp(*pod.Spec.InitContainers[i].Resources.Requests.StorageEphemeral()) < 0 {
+				initValue = *pod.Spec.InitContainers[i].Resources.Requests.StorageEphemeral()
+			}
 		}
 	}
 	if containerValue.Cmp(initValue) > 0 {
@@ -712,7 +716,8 @@ func (a byEvictionPriority) Less(i, j int) bool {
 
 // makeSignalObservations derives observations using the specified summary provider.
 func makeSignalObservations(summaryProvider stats.SummaryProvider, capacityProvider CapacityProvider, pods []*v1.Pod) (signalObservations, statsFunc, error) {
-	summary, err := summaryProvider.Get()
+	updateStats := true
+	summary, err := summaryProvider.Get(updateStats)
 	if err != nil {
 		return nil, nil, err
 	}
