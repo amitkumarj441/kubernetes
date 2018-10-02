@@ -28,7 +28,6 @@ import (
 	"k8s.io/client-go/tools/cache"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"k8s.io/kubernetes/pkg/features"
-	"k8s.io/kubernetes/pkg/volume"
 	volumeutil "k8s.io/kubernetes/pkg/volume/util"
 )
 
@@ -169,6 +168,13 @@ func findMatchingVolume(
 			continue
 		}
 
+		// check if PV's DeletionTimeStamp is set, if so, skip this volume.
+		if utilfeature.DefaultFeatureGate.Enabled(features.StorageObjectInUseProtection) {
+			if volume.ObjectMeta.DeletionTimestamp != nil {
+				continue
+			}
+		}
+
 		nodeAffinityValid := true
 		if node != nil {
 			// Scheduler path, check that the PV NodeAffinity
@@ -205,11 +211,18 @@ func findMatchingVolume(
 		}
 
 		// filter out:
+		// - volumes in non-available phase
 		// - volumes bound to another claim
 		// - volumes whose labels don't match the claim's selector, if specified
 		// - volumes in Class that is not requested
 		// - volumes whose NodeAffinity does not match the node
-		if volume.Spec.ClaimRef != nil {
+		if volume.Status.Phase != v1.VolumeAvailable {
+			// We ignore volumes in non-available phase, because volumes that
+			// satisfies matching criteria will be updated to available, binding
+			// them now has high chance of encountering unnecessary failures
+			// due to API conflicts.
+			continue
+		} else if volume.Spec.ClaimRef != nil {
 			continue
 		} else if selector != nil && !selector.Matches(labels.Set(volume.Labels)) {
 			continue
@@ -314,7 +327,7 @@ func (pvIndex *persistentVolumeOrderedIndex) allPossibleMatchingAccessModes(requ
 	keys := pvIndex.store.ListIndexFuncValues("accessmodes")
 	for _, key := range keys {
 		indexedModes := v1helper.GetAccessModesFromString(key)
-		if volume.AccessModesContainedInAll(indexedModes, requestedModes) {
+		if volumeutil.AccessModesContainedInAll(indexedModes, requestedModes) {
 			matchedModes = append(matchedModes, indexedModes)
 		}
 	}

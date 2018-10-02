@@ -22,7 +22,6 @@ import (
 
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	apiserverserviceaccount "k8s.io/apiserver/pkg/authentication/serviceaccount"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	certutil "k8s.io/client-go/util/cert"
@@ -128,8 +127,11 @@ func TestTokenGenerateAndValidate(t *testing.T) {
 	}
 
 	// Generate the RSA token
-	rsaGenerator := serviceaccount.JWTTokenGenerator(serviceaccount.LegacyIssuer, getPrivateKey(rsaPrivateKey))
-	rsaToken, err := rsaGenerator.GenerateToken(*serviceAccount, *rsaSecret)
+	rsaGenerator, err := serviceaccount.JWTTokenGenerator(serviceaccount.LegacyIssuer, getPrivateKey(rsaPrivateKey))
+	if err != nil {
+		t.Fatalf("error making generator: %v", err)
+	}
+	rsaToken, err := rsaGenerator.GenerateToken(serviceaccount.LegacyClaims(*serviceAccount, *rsaSecret))
 	if err != nil {
 		t.Fatalf("error generating token: %v", err)
 	}
@@ -141,8 +143,11 @@ func TestTokenGenerateAndValidate(t *testing.T) {
 	}
 
 	// Generate the ECDSA token
-	ecdsaGenerator := serviceaccount.JWTTokenGenerator(serviceaccount.LegacyIssuer, getPrivateKey(ecdsaPrivateKey))
-	ecdsaToken, err := ecdsaGenerator.GenerateToken(*serviceAccount, *ecdsaSecret)
+	ecdsaGenerator, err := serviceaccount.JWTTokenGenerator(serviceaccount.LegacyIssuer, getPrivateKey(ecdsaPrivateKey))
+	if err != nil {
+		t.Fatalf("error making generator: %v", err)
+	}
+	ecdsaToken, err := ecdsaGenerator.GenerateToken(serviceaccount.LegacyClaims(*serviceAccount, *ecdsaSecret))
 	if err != nil {
 		t.Fatalf("error generating token: %v", err)
 	}
@@ -154,8 +159,11 @@ func TestTokenGenerateAndValidate(t *testing.T) {
 	}
 
 	// Generate signer with same keys as RSA signer but different issuer
-	badIssuerGenerator := serviceaccount.JWTTokenGenerator("foo", getPrivateKey(rsaPrivateKey))
-	badIssuerToken, err := badIssuerGenerator.GenerateToken(*serviceAccount, *rsaSecret)
+	badIssuerGenerator, err := serviceaccount.JWTTokenGenerator("foo", getPrivateKey(rsaPrivateKey))
+	if err != nil {
+		t.Fatalf("error making generator: %v", err)
+	}
+	badIssuerToken, err := badIssuerGenerator.GenerateToken(serviceaccount.LegacyClaims(*serviceAccount, *rsaSecret))
 	if err != nil {
 		t.Fatalf("error generating token: %v", err)
 	}
@@ -267,7 +275,7 @@ func TestTokenGenerateAndValidate(t *testing.T) {
 
 	for k, tc := range testCases {
 		getter := serviceaccountcontroller.NewGetterFromClient(tc.Client)
-		authenticator := serviceaccount.JWTTokenAuthenticator(serviceaccount.LegacyIssuer, tc.Keys, tc.Client != nil, getter)
+		authenticator := serviceaccount.JWTTokenAuthenticator(serviceaccount.LegacyIssuer, tc.Keys, serviceaccount.NewLegacyValidator(tc.Client != nil, getter))
 
 		// An invalid, non-JWT token should always fail
 		if _, ok, err := authenticator.AuthenticateToken("invalid token"); err != nil || ok {
@@ -301,25 +309,6 @@ func TestTokenGenerateAndValidate(t *testing.T) {
 		if !reflect.DeepEqual(user.GetGroups(), tc.ExpectedGroups) {
 			t.Errorf("%s: Expected groups=%v, got %v", k, tc.ExpectedGroups, user.GetGroups())
 			continue
-		}
-	}
-}
-
-func TestMakeSplitUsername(t *testing.T) {
-	username := apiserverserviceaccount.MakeUsername("ns", "name")
-	ns, name, err := apiserverserviceaccount.SplitUsername(username)
-	if err != nil {
-		t.Errorf("Unexpected error %v", err)
-	}
-	if ns != "ns" || name != "name" {
-		t.Errorf("Expected ns/name, got %s/%s", ns, name)
-	}
-
-	invalid := []string{"test", "system:serviceaccount", "system:serviceaccount:", "system:serviceaccount:ns", "system:serviceaccount:ns:name:extra"}
-	for _, n := range invalid {
-		_, _, err := apiserverserviceaccount.SplitUsername("test")
-		if err == nil {
-			t.Errorf("Expected error for %s", n)
 		}
 	}
 }

@@ -28,7 +28,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"sort"
 	"text/template"
 	"time"
 
@@ -175,14 +174,14 @@ func (gce *GCE) {{.WrapType}}() {{.WrapType}} {
 {{- end}}
 
 // NewMockGCE returns a new mock for GCE.
-func NewMockGCE() *MockGCE {
+func NewMockGCE(projectRouter ProjectRouter) *MockGCE {
 	{{- range .Groups}}
 	mock{{.Service}}Objs := map[meta.Key]*Mock{{.Service}}Obj{}
 	{{- end}}
 
 	mock := &MockGCE{
 	{{- range .All}}
-		{{.MockField}}: New{{.MockWrapType}}(mock{{.Service}}Objs),
+		{{.MockField}}: New{{.MockWrapType}}(projectRouter, mock{{.Service}}Objs),
 	{{- end}}
 	}
 	return mock
@@ -306,8 +305,10 @@ type {{.WrapType}} interface {
 }
 
 // New{{.MockWrapType}} returns a new mock for {{.Service}}.
-func New{{.MockWrapType}}(objs map[meta.Key]*Mock{{.Service}}Obj) *{{.MockWrapType}} {
+func New{{.MockWrapType}}(pr ProjectRouter, objs map[meta.Key]*Mock{{.Service}}Obj) *{{.MockWrapType}} {
 	mock := &{{.MockWrapType}}{
+		ProjectRouter: pr,
+
 		Objects: objs,
 		{{- if .GenerateGet}}
 		GetError:    map[meta.Key]error{},
@@ -325,6 +326,8 @@ func New{{.MockWrapType}}(objs map[meta.Key]*Mock{{.Service}}Obj) *{{.MockWrapTy
 // {{.MockWrapType}} is the mock for {{.Service}}.
 type {{.MockWrapType}} struct {
 	Lock sync.Mutex
+
+	ProjectRouter ProjectRouter
 
 	// Objects maintained by the mock.
 	Objects map[meta.Key]*Mock{{.Service}}Obj
@@ -352,27 +355,27 @@ type {{.MockWrapType}} struct {
 	// execution flow of the mock. Return (false, nil, nil) to continue with
 	// normal mock behavior/ after the hook function executes.
 	{{- if .GenerateGet}}
-	GetHook    func(m *{{.MockWrapType}}, ctx context.Context, key *meta.Key) (bool, *{{.FQObjectType}}, error)
+	GetHook    func(ctx context.Context, key *meta.Key, m *{{.MockWrapType}}) (bool, *{{.FQObjectType}}, error)
 	{{- end -}}
 	{{- if .GenerateList}}
 	{{- if .KeyIsGlobal}}
-	ListHook   func(m *{{.MockWrapType}}, ctx context.Context, fl *filter.F) (bool, []*{{.FQObjectType}}, error)
+	ListHook   func(ctx context.Context, fl *filter.F, m *{{.MockWrapType}}) (bool, []*{{.FQObjectType}}, error)
 	{{- end -}}
 	{{- if .KeyIsRegional}}
-	ListHook   func(m *{{.MockWrapType}}, ctx context.Context, region string, fl *filter.F) (bool, []*{{.FQObjectType}}, error)
+	ListHook   func(ctx context.Context, region string, fl *filter.F, m *{{.MockWrapType}}) (bool, []*{{.FQObjectType}}, error)
 	{{- end -}}
 	{{- if .KeyIsZonal}}
-	ListHook   func(m *{{.MockWrapType}}, ctx context.Context, zone string, fl *filter.F) (bool, []*{{.FQObjectType}}, error)
+	ListHook   func(ctx context.Context, zone string, fl *filter.F, m *{{.MockWrapType}}) (bool, []*{{.FQObjectType}}, error)
 	{{- end}}
 	{{- end -}}
 	{{- if .GenerateInsert}}
-	InsertHook func(m *{{.MockWrapType}}, ctx context.Context, key *meta.Key, obj *{{.FQObjectType}}) (bool, error)
+	InsertHook func(ctx context.Context, key *meta.Key, obj *{{.FQObjectType}}, m *{{.MockWrapType}}) (bool, error)
 	{{- end -}}
 	{{- if .GenerateDelete}}
-	DeleteHook func(m *{{.MockWrapType}}, ctx context.Context, key *meta.Key) (bool, error)
+	DeleteHook func(ctx context.Context, key *meta.Key, m *{{.MockWrapType}}) (bool, error)
 	{{- end -}}
 	{{- if .AggregatedList}}
-	AggregatedListHook func(m *{{.MockWrapType}}, ctx context.Context, fl *filter.F) (bool, map[string][]*{{.FQObjectType}}, error)
+	AggregatedListHook func(ctx context.Context, fl *filter.F, m *{{.MockWrapType}}) (bool, map[string][]*{{.FQObjectType}}, error)
 	{{- end}}
 
 {{- with .Methods -}}
@@ -390,7 +393,7 @@ type {{.MockWrapType}} struct {
 // Get returns the object from the mock.
 func (m *{{.MockWrapType}}) Get(ctx context.Context, key *meta.Key) (*{{.FQObjectType}}, error) {
 	if m.GetHook != nil {
-		if intercept, obj, err := m.GetHook(m, ctx, key);  intercept {
+		if intercept, obj, err := m.GetHook(ctx, key, m);  intercept {
 			glog.V(5).Infof("{{.MockWrapType}}.Get(%v, %s) = %+v, %v", ctx, key, obj ,err)
 			return obj, err
 		}
@@ -436,15 +439,15 @@ func (m *{{.MockWrapType}}) List(ctx context.Context, zone string, fl *filter.F)
 {{- end}}
 	if m.ListHook != nil {
 		{{if .KeyIsGlobal -}}
-		if intercept, objs, err := m.ListHook(m, ctx, fl);  intercept {
+		if intercept, objs, err := m.ListHook(ctx, fl, m);  intercept {
 			glog.V(5).Infof("{{.MockWrapType}}.List(%v, %v) = [%v items], %v", ctx, fl, len(objs), err)
 		{{- end -}}
 		{{- if .KeyIsRegional -}}
-		if intercept, objs, err := m.ListHook(m, ctx, region, fl);  intercept {
+		if intercept, objs, err := m.ListHook(ctx, region, fl, m);  intercept {
 			glog.V(5).Infof("{{.MockWrapType}}.List(%v, %q, %v) = [%v items], %v", ctx, region, fl, len(objs), err)
 		{{- end -}}
 		{{- if .KeyIsZonal -}}
-		if intercept, objs, err := m.ListHook(m, ctx, zone, fl);  intercept {
+		if intercept, objs, err := m.ListHook(ctx, zone, fl, m);  intercept {
 			glog.V(5).Infof("{{.MockWrapType}}.List(%v, %q, %v) = [%v items], %v", ctx, zone, fl, len(objs), err)
 		{{- end}}
 			return objs, err
@@ -508,7 +511,7 @@ func (m *{{.MockWrapType}}) List(ctx context.Context, zone string, fl *filter.F)
 // Insert is a mock for inserting/creating a new object.
 func (m *{{.MockWrapType}}) Insert(ctx context.Context, key *meta.Key, obj *{{.FQObjectType}}) error {
 	if m.InsertHook != nil {
-		if intercept, err := m.InsertHook(m, ctx, key, obj);  intercept {
+		if intercept, err := m.InsertHook(ctx, key, obj, m);  intercept {
 			glog.V(5).Infof("{{.MockWrapType}}.Insert(%v, %v, %+v) = %v", ctx, key, obj, err)
 			return err
 		}
@@ -534,9 +537,8 @@ func (m *{{.MockWrapType}}) Insert(ctx context.Context, key *meta.Key, obj *{{.F
 	}
 
 	obj.Name = key.Name
-	if obj.SelfLink == "" {
-		obj.SelfLink = SelfLink(meta.Version{{.VersionTitle}}, "mock-project", "{{.Resource}}", key)
-	}
+	projectID := m.ProjectRouter.ProjectID(ctx, "{{.Version}}", "{{.Resource}}")
+	obj.SelfLink = SelfLink(meta.Version{{.VersionTitle}}, projectID, "{{.Resource}}", key)
 
 	m.Objects[*key] = &Mock{{.Service}}Obj{obj}
 	glog.V(5).Infof("{{.MockWrapType}}.Insert(%v, %v, %+v) = nil", ctx, key, obj)
@@ -548,7 +550,7 @@ func (m *{{.MockWrapType}}) Insert(ctx context.Context, key *meta.Key, obj *{{.F
 // Delete is a mock for deleting the object.
 func (m *{{.MockWrapType}}) Delete(ctx context.Context, key *meta.Key) error {
 	if m.DeleteHook != nil {
-		if intercept, err := m.DeleteHook(m, ctx, key);  intercept {
+		if intercept, err := m.DeleteHook(ctx, key, m);  intercept {
 			glog.V(5).Infof("{{.MockWrapType}}.Delete(%v, %v) = %v", ctx, key, err)
 			return err
 		}
@@ -583,7 +585,7 @@ func (m *{{.MockWrapType}}) Delete(ctx context.Context, key *meta.Key) error {
 // AggregatedList is a mock for AggregatedList.
 func (m *{{.MockWrapType}}) AggregatedList(ctx context.Context, fl *filter.F) (map[string][]*{{.FQObjectType}}, error) {
 	if m.AggregatedListHook != nil {
-		if intercept, objs, err := m.AggregatedListHook(m, ctx, fl); intercept {
+		if intercept, objs, err := m.AggregatedListHook(ctx, fl, m); intercept {
 			glog.V(5).Infof("{{.MockWrapType}}.AggregatedList(%v, %v) = [%v items], %v", ctx, fl, len(objs), err)
 			return objs, err
 		}
@@ -632,17 +634,17 @@ func (m *{{.MockWrapType}}) Obj(o *{{.FQObjectType}}) *Mock{{.Service}}Obj {
 func (m *{{.MockWrapType}}) {{.FcnArgs}} {
 {{- if .IsOperation }}
 	if m.{{.MockHookName}} != nil {
-		return m.{{.MockHookName}}(m, ctx, key {{.CallArgs}})
+		return m.{{.MockHookName}}(ctx, key {{.CallArgs}}, m)
 	}
 	return nil
 {{- else if .IsGet}}
 	if m.{{.MockHookName}} != nil {
-		return m.{{.MockHookName}}(m, ctx, key {{.CallArgs}})
+		return m.{{.MockHookName}}(ctx, key {{.CallArgs}}, m)
 	}
 	return nil, fmt.Errorf("{{.MockHookName}} must be set")
 {{- else if .IsPaged}}
 	if m.{{.MockHookName}} != nil {
-		return m.{{.MockHookName}}(m, ctx, key {{.CallArgs}}, fl)
+		return m.{{.MockHookName}}(ctx, key {{.CallArgs}}, fl, m)
 	}
 	return nil, nil
 {{- end}}
@@ -983,6 +985,38 @@ func (g *{{.GCEWrapType}}) {{.FcnArgs}} {
 	}
 }
 
+// genTypes generates the type wrappers.
+func genResourceIDs(wr io.Writer) {
+	const text = `
+// New{{.Service}}ResourceID creates a ResourceID for the {{.Service}} resource.
+{{- if .KeyIsProject}}
+func New{{.Service}}ResourceID(project string) *ResourceID {
+	var key *meta.Key
+{{- else}}
+{{- if .KeyIsGlobal}}
+func New{{.Service}}ResourceID(project, name string) *ResourceID {
+	key := meta.GlobalKey(name)
+{{- end}}
+{{- if .KeyIsRegional}}
+func New{{.Service}}ResourceID(project, region, name string) *ResourceID {
+	key := meta.RegionalKey(name, region)
+{{- end}}
+{{- if .KeyIsZonal}}
+func New{{.Service}}ResourceID(project, zone, name string) *ResourceID {
+	key := meta.ZonalKey(name, zone)
+{{- end -}}
+{{end}}
+	return &ResourceID{project, "{{.Resource}}", key}
+}
+`
+	tmpl := template.Must(template.New("resourceIDs").Parse(text))
+	for _, sg := range meta.SortedServicesGroups {
+		if err := tmpl.Execute(wr, sg.ServiceInfo()); err != nil {
+			panic(err)
+		}
+	}
+}
+
 func genUnitTestHeader(wr io.Writer) {
 	const text = `/*
 Copyright {{.Year}} The Kubernetes Authors.
@@ -1036,7 +1070,8 @@ func Test{{.Service}}Group(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	mock := NewMockGCE()
+	pr := &SingleProjectRouter{"mock-project"}
+	mock := NewMockGCE(pr)
 
 	var key *meta.Key
 {{- if .HasAlpha}}
@@ -1172,7 +1207,7 @@ func Test{{.Service}}Group(t *testing.T) {
 				got[obj.Name] = true
 			}
 			if !reflect.DeepEqual(got, want) {
-				t.Errorf("Alpha{{.Service}}().List(); got %+v, want %+v", got, want)
+				t.Errorf("Beta{{.Service}}().List(); got %+v, want %+v", got, want)
 			}
 		}
 	}
@@ -1192,7 +1227,7 @@ func Test{{.Service}}Group(t *testing.T) {
 				got[obj.Name] = true
 			}
 			if !reflect.DeepEqual(got, want) {
-				t.Errorf("Alpha{{.Service}}().List(); got %+v, want %+v", got, want)
+				t.Errorf("{{.Service}}().List(); got %+v, want %+v", got, want)
 			}
 		}
 	}
@@ -1234,17 +1269,83 @@ func Test{{.Service}}Group(t *testing.T) {
 }
 `
 	tmpl := template.Must(template.New("unittest").Parse(text))
-	// Sort keys so the output will be stable.
-	var keys []string
-	for k := range meta.AllServicesByGroup {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		s := meta.AllServicesByGroup[k]
-		if err := tmpl.Execute(wr, s); err != nil {
+	for _, sg := range meta.SortedServicesGroups {
+		if err := tmpl.Execute(wr, sg); err != nil {
 			panic(err)
 		}
+	}
+}
+
+func genUnitTestResourceIDConversion(wr io.Writer) {
+	const text = `
+func TestResourceIDConversion(t *testing.T) {
+	t.Parallel()
+
+	for _, id := range []*ResourceID{
+		{{- range .Groups}}
+		{{- with .ServiceInfo}}
+		{{- if .KeyIsProject}}
+		New{{.Service}}ResourceID("my-{{.Resource}}-resource"),
+		{{- else}}
+		{{- if .KeyIsGlobal}}
+		New{{.Service}}ResourceID("some-project", "my-{{.Resource}}-resource"),
+		{{- end}}
+		{{- if .KeyIsRegional}}
+		New{{.Service}}ResourceID("some-project", "us-central1", "my-{{.Resource}}-resource"),
+		{{- end}}
+		{{- if .KeyIsZonal}}
+		New{{.Service}}ResourceID("some-project", "us-east1-b", "my-{{.Resource}}-resource"),
+		{{- end -}}
+		{{end -}}
+		{{end -}}
+		{{end}}
+	} {
+		t.Run(id.Resource, func(t *testing.T) {
+			// Test conversion to and from full URL.
+			fullURL := id.SelfLink(meta.VersionGA)
+			parsedID, err := ParseResourceURL(fullURL)
+			if err != nil {
+				t.Errorf("ParseResourceURL(%s) = _, %v, want nil", fullURL, err)
+			}
+			if !reflect.DeepEqual(id, parsedID) {
+				t.Errorf("SelfLink(%+v) -> ParseResourceURL(%s) = %+v, want original ID", id, fullURL, parsedID)
+			}
+
+			// Test conversion to and from relative resource name.
+			relativeName := id.RelativeResourceName()
+			parsedID, err = ParseResourceURL(relativeName)
+			if err != nil {
+				t.Errorf("ParseResourceURL(%s) = _, %v, want nil", relativeName, err)
+			}
+			if !reflect.DeepEqual(id, parsedID) {
+				t.Errorf("RelativeResourceName(%+v) -> ParseResourceURL(%s) = %+v, want original ID", id, relativeName, parsedID)
+			}
+
+			// Do not test ResourcePath for projects.
+			if id.Resource == "projects" {
+				return
+			}
+
+			// Test conversion to and from resource path.
+			resourcePath := id.ResourcePath()
+			parsedID, err = ParseResourceURL(resourcePath)
+			if err != nil {
+				t.Errorf("ParseResourceURL(%s) = _, %v, want nil", resourcePath, err)
+			}
+			id.ProjectID = ""
+			if !reflect.DeepEqual(id, parsedID) {
+				t.Errorf("ResourcePath(%+v) -> ParseResourceURL(%s) = %+v, want %+v", id, resourcePath, parsedID, id)
+			}
+		})
+	}
+}
+`
+	data := struct {
+		Groups []*meta.ServiceGroup
+	}{meta.SortedServicesGroups}
+	tmpl := template.Must(template.New("unittest-resourceIDs").Parse(text))
+	if err := tmpl.Execute(wr, data); err != nil {
+		panic(err)
 	}
 }
 
@@ -1258,9 +1359,11 @@ func main() {
 		genHeader(out)
 		genStubs(out)
 		genTypes(out)
+		genResourceIDs(out)
 	case "test":
 		genUnitTestHeader(out)
 		genUnitTestServices(out)
+		genUnitTestResourceIDConversion(out)
 	default:
 		log.Fatalf("Invalid -mode: %q", flags.mode)
 	}

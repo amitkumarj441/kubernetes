@@ -27,7 +27,6 @@ type runtimeState struct {
 	lastBaseRuntimeSync      time.Time
 	baseRuntimeSyncThreshold time.Duration
 	networkError             error
-	internalError            error
 	cidr                     string
 	healthChecks             []*healthCheck
 }
@@ -51,12 +50,6 @@ func (s *runtimeState) setRuntimeSync(t time.Time) {
 	s.Lock()
 	defer s.Unlock()
 	s.lastBaseRuntimeSync = t
-}
-
-func (s *runtimeState) setInternalError(err error) {
-	s.Lock()
-	defer s.Unlock()
-	s.internalError = err
 }
 
 func (s *runtimeState) setNetworkState(err error) {
@@ -84,9 +77,6 @@ func (s *runtimeState) runtimeErrors() []string {
 	if !s.lastBaseRuntimeSync.Add(s.baseRuntimeSyncThreshold).After(time.Now()) {
 		ret = append(ret, "container runtime is down")
 	}
-	if s.internalError != nil {
-		ret = append(ret, s.internalError.Error())
-	}
 	for _, hc := range s.healthChecks {
 		if ok, err := hc.fn(); !ok {
 			ret = append(ret, fmt.Sprintf("%s is not healthy: %v", hc.name, err))
@@ -113,6 +103,5 @@ func newRuntimeState(
 		lastBaseRuntimeSync:      time.Time{},
 		baseRuntimeSyncThreshold: runtimeSyncThreshold,
 		networkError:             fmt.Errorf("network state unknown"),
-		internalError:            nil,
 	}
 }

@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
-	"k8s.io/kubernetes/pkg/util/version"
 )
 
 const (
@@ -114,6 +114,11 @@ func EnforceVersionPolicies(versionGetter VersionGetter, newK8sVersionStr string
 			// Upgrading to a higher patch version than kubeadm is ok if the user specifies --force. Not recommended, but possible.
 			skewErrors.Skippable = append(skewErrors.Skippable, fmt.Errorf("Specified version to upgrade to %q is higher than the kubeadm version %q. Upgrade kubeadm first using the tool you used to install kubeadm", newK8sVersionStr, kubeadmVersionStr))
 		}
+	}
+
+	if kubeadmVersion.Major() > newK8sVersion.Major() ||
+		kubeadmVersion.Minor() > newK8sVersion.Minor() {
+		skewErrors.Skippable = append(skewErrors.Skippable, fmt.Errorf("Kubeadm version %s can only be used to upgrade to Kubernetes version %d.%d", kubeadmVersionStr, kubeadmVersion.Major(), kubeadmVersion.Minor()))
 	}
 
 	// Detect if the version is unstable and the user didn't allow that

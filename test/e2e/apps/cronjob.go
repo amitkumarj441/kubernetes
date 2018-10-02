@@ -33,8 +33,8 @@ import (
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	batchinternal "k8s.io/kubernetes/pkg/apis/batch"
 	"k8s.io/kubernetes/pkg/controller/job"
-	"k8s.io/kubernetes/pkg/kubectl"
 	"k8s.io/kubernetes/test/e2e/framework"
+	imageutils "k8s.io/kubernetes/test/utils/image"
 )
 
 const (
@@ -51,7 +51,7 @@ var _ = SIGDescribe("CronJob", func() {
 	successCommand := []string{"/bin/true"}
 
 	BeforeEach(func() {
-		framework.SkipIfMissingResource(f.ClientPool, CronJobGroupVersionResourceBeta, f.Namespace.Name)
+		framework.SkipIfMissingResource(f.DynamicClient, CronJobGroupVersionResourceBeta, f.Namespace.Name)
 	})
 
 	// multiple jobs running at once
@@ -180,8 +180,8 @@ var _ = SIGDescribe("CronJob", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Ensuring no unexpected event has happened")
-		err = checkNoEventWithReason(f.ClientSet, f.Namespace.Name, cronJob.Name, []string{"MissingJob", "UnexpectedJob"})
-		Expect(err).NotTo(HaveOccurred())
+		err = waitForEventWithReason(f.ClientSet, f.Namespace.Name, cronJob.Name, []string{"MissingJob", "UnexpectedJob"})
+		Expect(err).To(HaveOccurred())
 
 		By("Removing cronjob")
 		err = deleteCronJob(f.ClientSet, f.Namespace.Name, cronJob.Name)
@@ -207,11 +207,7 @@ var _ = SIGDescribe("CronJob", func() {
 
 		By("Deleting the job")
 		job := cronJob.Status.Active[0]
-		reaper, err := kubectl.ReaperFor(batchinternal.Kind("Job"), f.InternalClientset)
-		Expect(err).NotTo(HaveOccurred())
-		timeout := 1 * time.Minute
-		err = reaper.Stop(f.Namespace.Name, job.Name, timeout, metav1.NewDeleteOptions(0))
-		Expect(err).NotTo(HaveOccurred())
+		framework.ExpectNoError(framework.DeleteResourceAndWaitForGC(f.ClientSet, batchinternal.Kind("Job"), f.Namespace.Name, job.Name))
 
 		By("Ensuring job was deleted")
 		_, err = framework.GetJob(f.ClientSet, f.Namespace.Name, job.Name)
@@ -222,9 +218,9 @@ var _ = SIGDescribe("CronJob", func() {
 		err = waitForNoJobs(f.ClientSet, f.Namespace.Name, cronJob.Name, true)
 		Expect(err).NotTo(HaveOccurred())
 
-		By("Ensuring MissingJob event has occured")
-		err = checkNoEventWithReason(f.ClientSet, f.Namespace.Name, cronJob.Name, []string{"MissingJob"})
-		Expect(err).To(HaveOccurred())
+		By("Ensuring MissingJob event has occurred")
+		err = waitForEventWithReason(f.ClientSet, f.Namespace.Name, cronJob.Name, []string{"MissingJob"})
+		Expect(err).NotTo(HaveOccurred())
 
 		By("Removing cronjob")
 		err = deleteCronJob(f.ClientSet, f.Namespace.Name, cronJob.Name)
@@ -303,7 +299,7 @@ func newTestCronJob(name, schedule string, concurrencyPolicy batchv1beta1.Concur
 							Containers: []v1.Container{
 								{
 									Name:  "c",
-									Image: "busybox",
+									Image: imageutils.GetE2EImage(imageutils.BusyBox),
 									VolumeMounts: []v1.VolumeMount{
 										{
 											MountPath: "/data",
@@ -430,24 +426,26 @@ func waitForAnyFinishedJob(c clientset.Interface, ns string) error {
 	})
 }
 
-// checkNoEventWithReason checks no events with a reason within a list has occured
-func checkNoEventWithReason(c clientset.Interface, ns, cronJobName string, reasons []string) error {
-	sj, err := c.BatchV1beta1().CronJobs(ns).Get(cronJobName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("Error in getting cronjob %s/%s: %v", ns, cronJobName, err)
-	}
-	events, err := c.CoreV1().Events(ns).Search(legacyscheme.Scheme, sj)
-	if err != nil {
-		return fmt.Errorf("Error in listing events: %s", err)
-	}
-	for _, e := range events.Items {
-		for _, reason := range reasons {
-			if e.Reason == reason {
-				return fmt.Errorf("Found event with reason %s: %#v", reason, e)
+// waitForEventWithReason waits for events with a reason within a list has occurred
+func waitForEventWithReason(c clientset.Interface, ns, cronJobName string, reasons []string) error {
+	return wait.Poll(framework.Poll, 30*time.Second, func() (bool, error) {
+		sj, err := c.BatchV1beta1().CronJobs(ns).Get(cronJobName, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		events, err := c.CoreV1().Events(ns).Search(legacyscheme.Scheme, sj)
+		if err != nil {
+			return false, err
+		}
+		for _, e := range events.Items {
+			for _, reason := range reasons {
+				if e.Reason == reason {
+					return true, nil
+				}
 			}
 		}
-	}
-	return nil
+		return false, nil
+	})
 }
 
 // filterNotDeletedJobs returns the job list without any jobs that are pending

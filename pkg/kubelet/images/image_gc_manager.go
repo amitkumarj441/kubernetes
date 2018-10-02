@@ -34,6 +34,7 @@ import (
 	statsapi "k8s.io/kubernetes/pkg/kubelet/apis/stats/v1alpha1"
 	"k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/events"
+	"k8s.io/kubernetes/pkg/kubelet/util/sliceutils"
 )
 
 // StatsProvider is an interface for fetching stats used during image garbage
@@ -43,8 +44,7 @@ type StatsProvider interface {
 	ImageFsStats() (*statsapi.FsStats, error)
 }
 
-// Manages lifecycle of all images.
-//
+// ImageGCManager is an interface for managing lifecycle of all images.
 // Implementation is thread-safe.
 type ImageGCManager interface {
 	// Applies the garbage collection policy. Errors include being unable to free
@@ -56,11 +56,11 @@ type ImageGCManager interface {
 
 	GetImageList() ([]container.Image, error)
 
-	// Delete all unused images and returns the number of bytes freed. The number of bytes freed is always returned.
-	DeleteUnusedImages() (int64, error)
+	// Delete all unused images.
+	DeleteUnusedImages() error
 }
 
-// A policy for garbage collecting images. Policy defines an allowed band in
+// ImageGCPolicy is a policy for garbage collecting images. Policy defines an allowed band in
 // which garbage collection will be run.
 type ImageGCPolicy struct {
 	// Any usage above this threshold will always trigger garbage collection.
@@ -120,10 +120,14 @@ func (i *imageCache) set(images []container.Image) {
 	i.images = images
 }
 
-// get gets image list from image cache.
+// get gets a sorted (by image size) image list from image cache.
+// There is a potentical data race in this function. See PR #60448
+// Because there is deepcopy function available currently, move sort
+// function inside this function
 func (i *imageCache) get() []container.Image {
-	i.RLock()
-	defer i.RUnlock()
+	i.Lock()
+	defer i.Unlock()
+	sort.Sort(sliceutils.ByImageSize(i.images))
 	return i.images
 }
 
@@ -139,6 +143,7 @@ type imageRecord struct {
 	size int64
 }
 
+// NewImageGCManager instantiates a new ImageGCManager object.
 func NewImageGCManager(runtime container.Runtime, statsProvider StatsProvider, recorder record.EventRecorder, nodeRef *v1.ObjectReference, policy ImageGCPolicy, sandboxImage string) (ImageGCManager, error) {
 	// Validate policy.
 	if policy.HighThresholdPercent < 0 || policy.HighThresholdPercent > 100 {
@@ -292,7 +297,7 @@ func (im *realImageGCManager) GarbageCollect() error {
 	usagePercent := 100 - int(available*100/capacity)
 	if usagePercent >= im.policy.HighThresholdPercent {
 		amountToFree := capacity*int64(100-im.policy.LowThresholdPercent)/100 - available
-		glog.Infof("[imageGCManager]: Disk usage on image filesystem is at %d%% which is over the high threshold (%d%%). Trying to free %d bytes", usagePercent, im.policy.HighThresholdPercent, amountToFree)
+		glog.Infof("[imageGCManager]: Disk usage on image filesystem is at %d%% which is over the high threshold (%d%%). Trying to free %d bytes down to the low threshold (%d%%).", usagePercent, im.policy.HighThresholdPercent, amountToFree, im.policy.LowThresholdPercent)
 		freed, err := im.freeSpace(amountToFree, time.Now())
 		if err != nil {
 			return err
@@ -308,8 +313,10 @@ func (im *realImageGCManager) GarbageCollect() error {
 	return nil
 }
 
-func (im *realImageGCManager) DeleteUnusedImages() (int64, error) {
-	return im.freeSpace(math.MaxInt64, time.Now())
+func (im *realImageGCManager) DeleteUnusedImages() error {
+	glog.Infof("attempting to delete unused images")
+	_, err := im.freeSpace(math.MaxInt64, time.Now())
+	return err
 }
 
 // Tries to free bytesToFree worth of images on the disk.
@@ -349,7 +356,7 @@ func (im *realImageGCManager) freeSpace(bytesToFree int64, freeTime time.Time) (
 		// Images that are currently in used were given a newer lastUsed.
 		if image.lastUsed.Equal(freeTime) || image.lastUsed.After(freeTime) {
 			glog.V(5).Infof("Image ID %s has lastUsed=%v which is >= freeTime=%v, not eligible for garbage collection", image.id, image.lastUsed, freeTime)
-			break
+			continue
 		}
 
 		// Avoid garbage collect the image if the image is not old enough.
@@ -394,9 +401,8 @@ func (ev byLastUsedAndDetected) Less(i, j int) bool {
 	// Sort by last used, break ties by detected.
 	if ev[i].lastUsed.Equal(ev[j].lastUsed) {
 		return ev[i].firstDetected.Before(ev[j].firstDetected)
-	} else {
-		return ev[i].lastUsed.Before(ev[j].lastUsed)
 	}
+	return ev[i].lastUsed.Before(ev[j].lastUsed)
 }
 
 func isImageUsed(imageID string, imagesInUse sets.String) bool {

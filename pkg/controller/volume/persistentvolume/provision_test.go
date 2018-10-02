@@ -166,13 +166,13 @@ func TestProvisionSync(t *testing.T) {
 		{
 			// No provisioning if there is a matching volume available
 			"11-6 - provisioning when there is a volume available",
-			newVolumeArray("volume11-6", "1Gi", "", "", v1.VolumePending, v1.PersistentVolumeReclaimRetain, classGold),
+			newVolumeArray("volume11-6", "1Gi", "", "", v1.VolumeAvailable, v1.PersistentVolumeReclaimRetain, classGold),
 			newVolumeArray("volume11-6", "1Gi", "uid11-6", "claim11-6", v1.VolumeBound, v1.PersistentVolumeReclaimRetain, classGold, annBoundByController),
 			newClaimArray("claim11-6", "uid11-6", "1Gi", "", v1.ClaimPending, &classGold),
 			newClaimArray("claim11-6", "uid11-6", "1Gi", "volume11-6", v1.ClaimBound, &classGold, annBoundByController, annBindCompleted),
 			noevents, noerrors,
 			// No provisioning plugin confingure - makes the test fail when
-			// the controller errorneously tries to provision something
+			// the controller erroneously tries to provision something
 			wrapTestWithProvisionCalls([]provisionCall{provision1Success}, testSyncClaim),
 		},
 		{
@@ -416,7 +416,7 @@ func TestProvisionSync(t *testing.T) {
 			noerrors, wrapTestWithProvisionCalls([]provisionCall{}, testSyncClaim),
 		},
 	}
-	runSyncTests(t, tests, storageClasses)
+	runSyncTests(t, tests, storageClasses, []*v1.Pod{})
 }
 
 // Test multiple calls to syncClaim/syncVolume and periodic sync of all

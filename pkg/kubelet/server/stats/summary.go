@@ -19,8 +19,6 @@ package stats
 import (
 	"fmt"
 
-	"github.com/golang/glog"
-
 	statsapi "k8s.io/kubernetes/pkg/kubelet/apis/stats/v1alpha1"
 )
 
@@ -28,6 +26,8 @@ type SummaryProvider interface {
 	// Get provides a new Summary with the stats from Kubelet,
 	// and will update some stats if updateStats is true
 	Get(updateStats bool) (*statsapi.Summary, error)
+	// GetCPUAndMemoryStats provides a new Summary with the CPU and memory stats from Kubelet,
+	GetCPUAndMemoryStats() (*statsapi.Summary, error)
 }
 
 // summaryProviderImpl implements the SummaryProvider interface.
@@ -67,41 +67,54 @@ func (sp *summaryProviderImpl) Get(updateStats bool) (*statsapi.Summary, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pod stats: %v", err)
 	}
+	rlimit, err := sp.provider.RlimitStats()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get rlimit stats: %v", err)
+	}
 
 	nodeStats := statsapi.NodeStats{
-		NodeName:  node.Name,
-		CPU:       rootStats.CPU,
-		Memory:    rootStats.Memory,
-		Network:   networkStats,
-		StartTime: rootStats.StartTime,
-		Fs:        rootFsStats,
-		Runtime:   &statsapi.RuntimeStats{ImageFs: imageFsStats},
+		NodeName:         node.Name,
+		CPU:              rootStats.CPU,
+		Memory:           rootStats.Memory,
+		Network:          networkStats,
+		StartTime:        rootStats.StartTime,
+		Fs:               rootFsStats,
+		Runtime:          &statsapi.RuntimeStats{ImageFs: imageFsStats},
+		Rlimit:           rlimit,
+		SystemContainers: sp.GetSystemContainersStats(nodeConfig, podStats, updateStats),
 	}
-
-	systemContainers := map[string]string{
-		statsapi.SystemContainerKubelet: nodeConfig.KubeletCgroupsName,
-		statsapi.SystemContainerRuntime: nodeConfig.RuntimeCgroupsName,
-		statsapi.SystemContainerMisc:    nodeConfig.SystemCgroupsName,
-	}
-	for sys, name := range systemContainers {
-		// skip if cgroup name is undefined (not all system containers are required)
-		if name == "" {
-			continue
-		}
-		s, _, err := sp.provider.GetCgroupStats(name, false)
-		if err != nil {
-			glog.Errorf("Failed to get system container stats for %q: %v", name, err)
-			continue
-		}
-		// System containers don't have a filesystem associated with them.
-		s.Logs, s.Rootfs = nil, nil
-		s.Name = sys
-		nodeStats.SystemContainers = append(nodeStats.SystemContainers, *s)
-	}
-
 	summary := statsapi.Summary{
 		Node: nodeStats,
 		Pods: podStats,
 	}
 	return &summary, nil
+}
+
+func (sp *summaryProviderImpl) GetCPUAndMemoryStats() (*statsapi.Summary, error) {
+	summary, err := sp.Get(false)
+	if err != nil {
+		return nil, err
+	}
+	summary.Node.Network = nil
+	summary.Node.Fs = nil
+	summary.Node.Runtime = nil
+	summary.Node.Rlimit = nil
+	for i := 0; i < len(summary.Node.SystemContainers); i++ {
+		summary.Node.SystemContainers[i].Accelerators = nil
+		summary.Node.SystemContainers[i].Rootfs = nil
+		summary.Node.SystemContainers[i].Logs = nil
+		summary.Node.SystemContainers[i].UserDefinedMetrics = nil
+	}
+	for i := 0; i < len(summary.Pods); i++ {
+		summary.Pods[i].Network = nil
+		summary.Pods[i].VolumeStats = nil
+		summary.Pods[i].EphemeralStorage = nil
+		for j := 0; j < len(summary.Pods[i].Containers); j++ {
+			summary.Pods[i].Containers[j].Accelerators = nil
+			summary.Pods[i].Containers[j].Rootfs = nil
+			summary.Pods[i].Containers[j].Logs = nil
+			summary.Pods[i].Containers[j].UserDefinedMetrics = nil
+		}
+	}
+	return summary, nil
 }

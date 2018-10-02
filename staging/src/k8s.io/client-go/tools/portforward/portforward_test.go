@@ -99,8 +99,17 @@ func TestParsePortsAndNew(t *testing.T) {
 		if dialer.dialed {
 			t.Fatalf("%d: expected not dialed", i)
 		}
-		if e, a := test.expected, pf.ports; !reflect.DeepEqual(e, a) {
-			t.Fatalf("%d: ports: expected %#v, got %#v", i, e, a)
+		if _, portErr := pf.GetPorts(); portErr == nil {
+			t.Fatalf("%d: GetPorts: error expected but got nil", i)
+		}
+
+		// mock-signal the Ready channel
+		close(readyChan)
+
+		if ports, portErr := pf.GetPorts(); portErr != nil {
+			t.Fatalf("%d: GetPorts: unable to retrieve ports: %s", i, portErr)
+		} else if !reflect.DeepEqual(test.expected, ports) {
+			t.Fatalf("%d: ports: expected %#v, got %#v", i, test.expected, ports)
 		}
 		if e, a := expectedStopChan, pf.stopChan; e != a {
 			t.Fatalf("%d: stopChan: expected %#v, got %#v", i, e, a)
@@ -179,7 +188,7 @@ func TestGetListener(t *testing.T) {
 			t.Errorf("Test case #%d failed: Listener does not listen on expected address: asked '%v' got '%v'", i, testCase.ExpectedListenerAddress, host)
 		}
 		if port != expectedListenerPort {
-			t.Errorf("Test case #%d failed: Listener does not listen on exepected port: asked %v got %v", i, expectedListenerPort, port)
+			t.Errorf("Test case #%d failed: Listener does not listen on expected port: asked %v got %v", i, expectedListenerPort, port)
 
 		}
 		listener.Close()

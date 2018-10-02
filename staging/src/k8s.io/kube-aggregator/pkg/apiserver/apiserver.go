@@ -20,46 +20,31 @@ import (
 	"net/http"
 	"time"
 
-	"k8s.io/apimachinery/pkg/apimachinery/announced"
-	"k8s.io/apimachinery/pkg/apimachinery/registered"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/sets"
-	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
-	"k8s.io/apiserver/pkg/registry/rest"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	serverstorage "k8s.io/apiserver/pkg/server/storage"
 	"k8s.io/client-go/pkg/version"
 
 	"k8s.io/kube-aggregator/pkg/apis/apiregistration"
-	"k8s.io/kube-aggregator/pkg/apis/apiregistration/install"
 	"k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	"k8s.io/kube-aggregator/pkg/apis/apiregistration/v1beta1"
+	aggregatorscheme "k8s.io/kube-aggregator/pkg/apiserver/scheme"
 	"k8s.io/kube-aggregator/pkg/client/clientset_generated/internalclientset"
 	informers "k8s.io/kube-aggregator/pkg/client/informers/internalversion"
 	listers "k8s.io/kube-aggregator/pkg/client/listers/apiregistration/internalversion"
 	openapicontroller "k8s.io/kube-aggregator/pkg/controllers/openapi"
 	statuscontrollers "k8s.io/kube-aggregator/pkg/controllers/status"
-	apiservicestorage "k8s.io/kube-aggregator/pkg/registry/apiservice/etcd"
-)
-
-var (
-	groupFactoryRegistry = make(announced.APIGroupFactoryRegistry)
-	Registry             = registered.NewOrDie("")
-	Scheme               = runtime.NewScheme()
-	Codecs               = serializer.NewCodecFactory(Scheme)
+	apiservicerest "k8s.io/kube-aggregator/pkg/registry/apiservice/rest"
 )
 
 func init() {
-	install.Install(groupFactoryRegistry, Registry, Scheme)
-
 	// we need to add the options (like ListOptions) to empty v1
-	metav1.AddToGroupVersion(Scheme, schema.GroupVersion{Group: "", Version: "v1"})
+	metav1.AddToGroupVersion(aggregatorscheme.Scheme, schema.GroupVersion{Group: "", Version: "v1"})
 
 	unversioned := schema.GroupVersion{Group: "", Version: "v1"}
-	Scheme.AddUnversionedTypes(unversioned,
+	aggregatorscheme.Scheme.AddUnversionedTypes(unversioned,
 		&metav1.Status{},
 		&metav1.APIVersions{},
 		&metav1.APIGroupList{},
@@ -105,8 +90,6 @@ type APIAggregator struct {
 	GenericAPIServer *genericapiserver.GenericAPIServer
 
 	delegateHandler http.Handler
-
-	contextMapper genericapirequest.RequestContextMapper
 
 	// proxyClientCert/Key are the client cert used to identify this proxy. Backing APIServices use
 	// this to confirm the proxy's identity
@@ -172,7 +155,6 @@ func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.Deleg
 	s := &APIAggregator{
 		GenericAPIServer: genericServer,
 		delegateHandler:  delegationTarget.UnprotectedHandler(),
-		contextMapper:    c.GenericConfig.RequestContextMapper,
 		proxyClientCert:  c.ExtraConfig.ProxyClientCert,
 		proxyClientKey:   c.ExtraConfig.ProxyClientKey,
 		proxyTransport:   c.ExtraConfig.ProxyTransport,
@@ -183,36 +165,14 @@ func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.Deleg
 		serviceResolver:          c.ExtraConfig.ServiceResolver,
 	}
 
-	apiResourceConfig := c.GenericConfig.MergedResourceConfig
-	apiGroupInfo := genericapiserver.NewDefaultAPIGroupInfo(apiregistration.GroupName, Registry, Scheme, metav1.ParameterCodec, Codecs)
-	if apiResourceConfig.VersionEnabled(v1beta1.SchemeGroupVersion) {
-		apiGroupInfo.GroupMeta.GroupVersion = v1beta1.SchemeGroupVersion
-		storage := map[string]rest.Storage{}
-		// apiservices
-		apiServiceREST := apiservicestorage.NewREST(Scheme, c.GenericConfig.RESTOptionsGetter)
-		storage["apiservices"] = apiServiceREST
-		storage["apiservices/status"] = apiservicestorage.NewStatusREST(Scheme, apiServiceREST)
-		apiGroupInfo.VersionedResourcesStorageMap["v1beta1"] = storage
-	}
-	if apiResourceConfig.VersionEnabled(v1.SchemeGroupVersion) {
-		apiGroupInfo.GroupMeta.GroupVersion = v1.SchemeGroupVersion
-		storage := map[string]rest.Storage{}
-		// apiservices
-		apiServiceREST := apiservicestorage.NewREST(Scheme, c.GenericConfig.RESTOptionsGetter)
-		storage["apiservices"] = apiServiceREST
-		storage["apiservices/status"] = apiservicestorage.NewStatusREST(Scheme, apiServiceREST)
-
-		apiGroupInfo.VersionedResourcesStorageMap["v1"] = storage
-	}
-
+	apiGroupInfo := apiservicerest.NewRESTStorage(c.GenericConfig.MergedResourceConfig, c.GenericConfig.RESTOptionsGetter)
 	if err := s.GenericAPIServer.InstallAPIGroup(&apiGroupInfo); err != nil {
 		return nil, err
 	}
 
 	apisHandler := &apisHandler{
-		codecs: Codecs,
+		codecs: aggregatorscheme.Codecs,
 		lister: s.lister,
-		mapper: s.contextMapper,
 	}
 	s.GenericAPIServer.Handler.NonGoRestfulMux.Handle("/apis", apisHandler)
 	s.GenericAPIServer.Handler.NonGoRestfulMux.UnlistedHandle("/apis/", apisHandler)
@@ -243,7 +203,7 @@ func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.Deleg
 	})
 
 	if openApiConfig != nil {
-		specDownloader := openapicontroller.NewDownloader(s.contextMapper)
+		specDownloader := openapicontroller.NewDownloader()
 		openAPIAggregator, err := openapicontroller.BuildAndRegisterAggregator(
 			&specDownloader,
 			delegationTarget,
@@ -285,7 +245,6 @@ func (s *APIAggregator) AddAPIService(apiService *apiregistration.APIService) er
 
 	// register the proxy handler
 	proxyHandler := &proxyHandler{
-		contextMapper:   s.contextMapper,
 		localDelegate:   s.delegateHandler,
 		proxyClientCert: s.proxyClientCert,
 		proxyClientKey:  s.proxyClientKey,
@@ -313,11 +272,10 @@ func (s *APIAggregator) AddAPIService(apiService *apiregistration.APIService) er
 	// it's time to register the group aggregation endpoint
 	groupPath := "/apis/" + apiService.Spec.Group
 	groupDiscoveryHandler := &apiGroupHandler{
-		codecs:        Codecs,
-		groupName:     apiService.Spec.Group,
-		lister:        s.lister,
-		delegate:      s.delegateHandler,
-		contextMapper: s.contextMapper,
+		codecs:    aggregatorscheme.Codecs,
+		groupName: apiService.Spec.Group,
+		lister:    s.lister,
+		delegate:  s.delegateHandler,
 	}
 	// aggregation is protected
 	s.GenericAPIServer.Handler.NonGoRestfulMux.Handle(groupPath, groupDiscoveryHandler)
